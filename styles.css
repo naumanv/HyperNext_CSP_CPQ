@@ -1057,6 +1057,61 @@ tr:hover td { background: var(--bg); }
 .nav-admin { border-top: 1px solid rgba(255,255,255,0.08); margin-top: 8px; padding-top: 8px; }
 
 /* ============================================
+   Admin Config Cards (drawer)
+   ============================================ */
+.admin-cfg-card {
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: white;
+    transition: box-shadow var(--transition);
+}
+.admin-cfg-card:hover { box-shadow: var(--shadow-md); }
+
+.admin-cfg-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+}
+
+.admin-cfg-stats {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 0;
+}
+
+.admin-cfg-stat {
+    padding: 14px 18px;
+    border-right: 1px solid var(--border-light);
+    text-align: center;
+}
+.admin-cfg-stat:last-child { border-right: none; }
+.admin-cfg-stat.highlight { background: var(--primary-bg); }
+
+.admin-cfg-stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-bottom: 4px;
+    font-weight: 600;
+}
+
+.admin-cfg-stat-value {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+}
+.admin-cfg-stat.highlight .admin-cfg-stat-value { color: var(--primary); }
+
+@media (max-width: 768px) {
+    .admin-cfg-stats { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ============================================
    Save Modal
    ============================================ */
 .modal-overlay {

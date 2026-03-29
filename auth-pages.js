@@ -340,48 +340,315 @@ async function deleteConfigUI(id, name) {
   loadProfileConfigs();
 }
 
+// ── Capacity summary from a saved state object ─
+function _stateStats(s) {
+  if (!s) return { az:'—', tier:'—', nodes:0, vcpu:'—', mem:'—', storage:'—', cost:'—' };
+  try {
+    const ovr      = s.oversubscription || {};
+    const cpuRatio = ovr.cpuRatio || 4;
+    const cpuOH    = ovr.platformOverhead || 0.10;
+    const memOH    = ovr.memoryOverhead   || 0.10;
+    const types    = ['generalPurpose','computeIntensive','extremeCompute','memoryIntensive','extremeMemory'];
+    let nodes = 0, vcpu = 0, mem = 0;
+    types.forEach(t => {
+      const c = s.compute?.[t];
+      if (!c?.enabled || !c.nodes) return;
+      nodes += c.nodes;
+      const gross = c.cpuCores * 2 * cpuRatio * c.nodes;
+      vcpu += Math.round(gross * (1 - cpuOH));
+      mem  += Math.round(c.cpuCores * 2 * cpuRatio * c.memRatio * c.nodes * (1 - memOH));
+    });
+    const g = s.compute?.gpu;
+    if (g?.enabled && g.nodes) {
+      nodes += g.nodes;
+      const gGross = g.cpuCores * 2 * cpuRatio * g.nodes;
+      vcpu += Math.round(gGross * (1 - cpuOH));
+      mem  += Math.round(g.memPerNode * g.nodes * (1 - memOH));
+    }
+    let storage = 0;
+    ['tier1','tier2','tier3','tier4'].forEach(t => {
+      const st = s.storage?.[t];
+      if (!st?.enabled) return;
+      const isHDD  = t === 'tier3' || t === 'tier4';
+      const dSize  = isHDD ? (st.hddSize||18000) : (st.diskSize||3840);
+      const dCount = isHDD ? (st.hddsPerNode||0) : (st.disksPerNode||0);
+      const raw    = (dCount * dSize / 1000) * (st.nodes||0);
+      const prot   = st.protection === 'Replication 3x' ? 0.333 : 0.67;
+      storage += raw * prot * (1 - (st.overhead||0.25)) * (st.oversubRatio||2);
+    });
+    const memFmt = mem >= 1024 ? (mem/1024).toFixed(1)+' TB' : mem+' GB';
+    return { az: s.deployment?.option||'Single AZ', tier: s.deployment?.managedTier||'Essential',
+             billing: s.deployment?.billing||'—', nodes, vcpu: vcpu.toLocaleString(),
+             mem: memFmt, storage: storage.toFixed(1)+' TB' };
+  } catch(e) {
+    return { az:'—', tier:'—', nodes:0, vcpu:'—', mem:'—', storage:'—', billing:'—' };
+  }
+}
+
 // ── Admin page ───────────────────────────────
+let _adminTab = 'csps'; // 'csps' | 'configs'
+
 async function renderAdminPage() {
-  const { data: profiles, error } = await supa.getAllProfiles();
-  if (error) return `<div class="card"><div class="empty-state"><h3>Access denied or error</h3><p>${error.message}</p></div></div>`;
-  const total  = profiles?.length || 0;
-  const active = profiles?.filter(p => p.status === 'active').length || 0;
-  const adv    = profiles?.filter(p => p.managed_tier === 'Advance').length || 0;
+  const [{ data: profiles, error: pe }, { data: allCfgs, error: ce }] =
+    await Promise.all([ supa.getAllProfiles(), supa.getAllConfigs() ]);
+
+  if (pe) return `<div class="card"><div class="empty-state"><h3>Access denied</h3><p>${pe.message}</p></div></div>`;
+
+  const total   = profiles?.length || 0;
+  const active  = profiles?.filter(p => p.status === 'active').length || 0;
+  const adv     = profiles?.filter(p => p.managed_tier === 'Advance').length || 0;
+  const cfgCount= allCfgs?.length || 0;
+
+  // Build config count per CSP
+  const cfgsByCSP = {};
+  (allCfgs||[]).forEach(c => { cfgsByCSP[c.csp_id] = (cfgsByCSP[c.csp_id]||0) + 1; });
+
+  const cspTab = _adminTab === 'csps';
+
   return `
-    <div class="stats-grid mb-28">
-      <div class="stat-card"><div class="stat-icon purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87m-4-12a4 4 0 010 7.75"/></svg></div>
-        <div class="stat-value">${total}</div><div class="stat-label">Total CSPs</div></div>
-      <div class="stat-card"><div class="stat-icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg></div>
-        <div class="stat-value">${active}</div><div class="stat-label">Active CSPs</div></div>
-      <div class="stat-card"><div class="stat-icon blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></div>
-        <div class="stat-value">${adv}</div><div class="stat-label">Advance Tier</div></div>
-      <div class="stat-card"><div class="stat-icon orange"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div>
-        <div class="stat-value">${total - active}</div><div class="stat-label">Suspended</div></div>
+  <!-- KPI row -->
+  <div class="stats-grid mb-28">
+    <div class="stat-card">
+      <div class="stat-icon purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87m-4-12a4 4 0 010 7.75"/></svg></div>
+      <div class="stat-value">${total}</div><div class="stat-label">Total CSPs</div>
+      <div class="stat-detail">${active} active · ${total-active} suspended</div>
     </div>
-    <div class="card">
-      <div class="card-header">
-        <div><div class="card-title">CSP Directory</div>
-          <div class="card-subtitle">All registered Cloud Service Providers</div></div>
+    <div class="stat-card">
+      <div class="stat-icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg></div>
+      <div class="stat-value">${active}</div><div class="stat-label">Active CSPs</div>
+      <div class="stat-detail">${adv} on Advance tier</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-icon blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div>
+      <div class="stat-value">${cfgCount}</div><div class="stat-label">Saved Configs</div>
+      <div class="stat-detail">Across all CSPs</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-icon orange"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></div>
+      <div class="stat-value">${adv}</div><div class="stat-label">Advance Tier</div>
+      <div class="stat-detail">${total-adv} on Essential</div>
+    </div>
+  </div>
+
+  <!-- Search + Tabs -->
+  <div class="card">
+    <div class="card-header" style="flex-wrap:wrap;gap:12px">
+      <div class="tab-bar" style="margin-bottom:0;border:none">
+        <button class="tab-btn ${cspTab?'active':''}" onclick="switchAdminTab('csps')">
+          CSP Directory (${total})
+        </button>
+        <button class="tab-btn ${!cspTab?'active':''}" onclick="switchAdminTab('configs')">
+          All Configurations (${cfgCount})
+        </button>
       </div>
-      <div class="table-container"><table>
-        <thead><tr><th>Company</th><th>Contact</th><th>Country</th><th>Tier</th><th>Role</th><th>Status</th><th>Joined</th><th>Actions</th></tr></thead>
-        <tbody>${(profiles||[]).map(p => `<tr>
-          <td><div class="fw-600">${esc(p.company_name)||'—'}</div>
-            <div class="text-sm text-muted">${esc(p.contact_email)}</div></td>
-          <td>${esc(p.contact_name)||'—'}</td>
-          <td>${esc(p.country)||'—'}</td>
-          <td><span class="badge badge-primary">${p.managed_tier||'Essential'}</span></td>
-          <td><span class="badge ${p.role==='admin'?'badge-danger':'badge-muted'}">${p.role||'csp'}</span></td>
-          <td><span class="badge ${p.status==='active'?'badge-success':'badge-warning'}">
-            <span class="badge-dot"></span>${p.status||'active'}</span></td>
-          <td class="text-muted">${new Date(p.created_at).toLocaleDateString()}</td>
-          <td><div style="display:flex;gap:6px">
-            <button class="btn btn-sm btn-outline" onclick="adminToggle('${p.id}','${p.status||'active'}')">${(p.status||'active')==='active'?'Suspend':'Activate'}</button>
-            ${p.role!=='admin'?`<button class="btn btn-sm btn-outline" onclick="adminPromote('${p.id}')">Make Admin</button>`:''}
-          </div></td></tr>`).join('')}
-        </tbody>
-      </table></div>
+      <input class="form-input" id="adminSearch" placeholder="Search by company or email…"
+        oninput="adminFilter()" style="max-width:280px;margin-bottom:0">
+    </div>
+
+    <div id="adminTableWrap">
+      ${cspTab ? _renderCSPTable(profiles, cfgsByCSP) : _renderAllConfigsTable(allCfgs)}
+    </div>
+  </div>
+
+  <!-- Inline config drawer -->
+  <div id="adminDrawer" style="display:none" class="card mt-24">
+    <div id="adminDrawerContent"></div>
+  </div>`;
+}
+
+function switchAdminTab(tab) {
+  _adminTab = tab;
+  navigateTo('admin');
+}
+
+function adminFilter() {
+  const q = (document.getElementById('adminSearch')?.value || '').toLowerCase();
+  document.querySelectorAll('#adminTableWrap tbody tr.data-row').forEach(row => {
+    const text = row.dataset.search || '';
+    row.style.display = text.includes(q) ? '' : 'none';
+  });
+  // Also hide config sub-rows if CSP row hidden
+  document.querySelectorAll('#adminTableWrap tbody tr.cfg-row').forEach(row => {
+    const parentId = row.dataset.parent;
+    const parent = document.querySelector(`tr.data-row[data-id="${parentId}"]`);
+    if (parent && parent.style.display === 'none') row.style.display = 'none';
+  });
+}
+
+function _renderCSPTable(profiles, cfgsByCSP) {
+  if (!profiles?.length) return `<div class="empty-state"><h3>No CSPs registered yet</h3></div>`;
+  return `<div class="table-container"><table>
+    <thead><tr>
+      <th>Company</th><th>Contact</th><th>Country</th><th>Tier</th>
+      <th>Status</th><th>Configs</th><th>Joined</th><th>Actions</th>
+    </tr></thead>
+    <tbody>
+    ${profiles.map(p => {
+      const cfgs = cfgsByCSP[p.id] || 0;
+      const search = `${(p.company_name||'')} ${(p.contact_email||'')} ${(p.country||'')}`.toLowerCase();
+      return `
+      <tr class="data-row" data-id="${p.id}" data-search="${search}">
+        <td>
+          <div class="fw-600">${esc(p.company_name)||'—'}</div>
+          <div class="text-sm text-muted">${esc(p.contact_email)}</div>
+        </td>
+        <td>${esc(p.contact_name)||'—'}<br><span class="text-sm text-muted">${esc(p.phone||'')}</span></td>
+        <td>${esc(p.country)||'—'}</td>
+        <td>
+          <span class="badge badge-primary">${p.managed_tier||'Essential'}</span><br>
+          <span class="text-sm text-muted">${p.billing||'—'}</span>
+        </td>
+        <td>
+          <span class="badge ${p.status==='active'?'badge-success':'badge-warning'}">
+            <span class="badge-dot"></span>${p.status||'active'}
+          </span>
+        </td>
+        <td>
+          <span class="badge ${cfgs>0?'badge-info':'badge-muted'}" style="cursor:${cfgs>0?'pointer':'default'}"
+            onclick="${cfgs>0?`adminShowConfigs('${p.id}','${esc(p.company_name)}')`:''}"
+            title="${cfgs>0?'Click to view configurations':'No configurations saved'}">
+            ${cfgs} config${cfgs!==1?'s':''}
+          </span>
+        </td>
+        <td class="text-muted" style="white-space:nowrap">${new Date(p.created_at).toLocaleDateString()}</td>
+        <td>
+          <div style="display:flex;flex-direction:column;gap:5px">
+            <button class="btn btn-sm btn-primary" onclick="adminShowConfigs('${p.id}','${esc(p.company_name)}')" ${cfgs===0?'disabled':''}>
+              View Configs
+            </button>
+            <div style="display:flex;gap:5px">
+              <button class="btn btn-sm btn-outline" onclick="adminToggle('${p.id}','${p.status||'active'}')">
+                ${(p.status||'active')==='active'?'Suspend':'Activate'}
+              </button>
+              ${p.role!=='admin'?`<button class="btn btn-sm btn-outline" onclick="adminPromote('${p.id}')">Admin</button>`:'<span class="badge badge-danger">Admin</span>'}
+            </div>
+          </div>
+        </td>
+      </tr>`;
+    }).join('')}
+    </tbody>
+  </table></div>`;
+}
+
+function _renderAllConfigsTable(allCfgs) {
+  if (!allCfgs?.length) return `<div class="empty-state"><h3>No configurations saved yet</h3></div>`;
+  return `<div class="table-container"><table>
+    <thead><tr>
+      <th>Company</th><th>Config Name</th><th>Region / AZ</th>
+      <th>Deployment</th><th>vCPUs</th><th>Memory</th><th>Storage</th><th>Nodes</th><th>Last Saved</th><th>Action</th>
+    </tr></thead>
+    <tbody>
+    ${allCfgs.map(c => {
+      const st   = _stateStats(c.state);
+      const comp = c.csp_profiles?.company_name || '—';
+      const email= c.csp_profiles?.contact_email || '';
+      const search = `${comp} ${email} ${c.name} ${c.region}`.toLowerCase();
+      return `<tr class="data-row" data-search="${search}">
+        <td>
+          <div class="fw-600">${esc(comp)}</div>
+          <div class="text-sm text-muted">${esc(email)}</div>
+        </td>
+        <td class="fw-600">${esc(c.name)}</td>
+        <td>${esc(c.region)} / ${esc(c.az)}</td>
+        <td>
+          <span class="badge badge-muted">${st.az}</span><br>
+          <span class="text-sm text-muted">${st.tier} · ${st.billing}</span>
+        </td>
+        <td class="fw-600" style="color:var(--primary)">${st.vcpu}</td>
+        <td>${st.mem}</td>
+        <td>${st.storage}</td>
+        <td><span class="badge badge-info">${st.nodes} nodes</span></td>
+        <td class="text-muted" style="white-space:nowrap">${new Date(c.updated_at).toLocaleDateString()}</td>
+        <td>
+          <button class="btn btn-sm btn-outline" onclick="adminLoadConfig('${c.id}','${esc(c.name)}')">
+            Load into Planner
+          </button>
+        </td>
+      </tr>`;
+    }).join('')}
+    </tbody>
+  </table></div>`;
+}
+
+// ── Admin: show configs for a specific CSP in a drawer ──
+async function adminShowConfigs(cspId, companyName) {
+  const drawer = document.getElementById('adminDrawer');
+  const content = document.getElementById('adminDrawerContent');
+  drawer.style.display = 'block';
+  content.innerHTML = `<div class="empty-state"><h3>Loading configurations for ${esc(companyName)}…</h3></div>`;
+  drawer.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  const { data: configs, error } = await supa.getConfigs(cspId);
+
+  if (error || !configs?.length) {
+    content.innerHTML = `
+      <div class="card-header">
+        <div><div class="card-title">📁 ${esc(companyName)} — Configurations</div></div>
+        <button class="btn btn-sm btn-outline" onclick="document.getElementById('adminDrawer').style.display='none'">✕ Close</button>
+      </div>
+      <div class="empty-state"><h3>No saved configurations</h3><p>This CSP hasn't saved any capacity configurations yet.</p></div>`;
+    return;
+  }
+
+  content.innerHTML = `
+    <div class="card-header" style="margin-bottom:20px">
+      <div>
+        <div class="card-title">📁 ${esc(companyName)} — ${configs.length} Configuration${configs.length!==1?'s':''}</div>
+        <div class="card-subtitle">Capacity plans saved by this CSP</div>
+      </div>
+      <button class="btn btn-sm btn-outline" onclick="document.getElementById('adminDrawer').style.display='none'">✕ Close</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:16px">
+    ${configs.map(c => {
+      const st = _stateStats(c.state);
+      return `
+      <div class="admin-cfg-card">
+        <div class="admin-cfg-header">
+          <div>
+            <div class="fw-600" style="font-size:15px">${esc(c.name)}</div>
+            <div class="text-sm text-muted">${esc(c.region)} · ${esc(c.az)} · Saved ${new Date(c.updated_at).toLocaleDateString()}</div>
+          </div>
+          <button class="btn btn-sm btn-primary" onclick="adminLoadConfig('${c.id}','${esc(c.name)}')">
+            Load into Planner
+          </button>
+        </div>
+        <div class="admin-cfg-stats">
+          <div class="admin-cfg-stat">
+            <div class="admin-cfg-stat-label">Deployment</div>
+            <div class="admin-cfg-stat-value">${st.az}</div>
+          </div>
+          <div class="admin-cfg-stat">
+            <div class="admin-cfg-stat-label">Managed Tier</div>
+            <div class="admin-cfg-stat-value">${st.tier} / ${st.billing}</div>
+          </div>
+          <div class="admin-cfg-stat">
+            <div class="admin-cfg-stat-label">Compute Nodes</div>
+            <div class="admin-cfg-stat-value">${st.nodes}</div>
+          </div>
+          <div class="admin-cfg-stat highlight">
+            <div class="admin-cfg-stat-label">Sellable vCPUs</div>
+            <div class="admin-cfg-stat-value">${st.vcpu}</div>
+          </div>
+          <div class="admin-cfg-stat highlight">
+            <div class="admin-cfg-stat-label">Sellable Memory</div>
+            <div class="admin-cfg-stat-value">${st.mem}</div>
+          </div>
+          <div class="admin-cfg-stat highlight">
+            <div class="admin-cfg-stat-label">Sellable Storage</div>
+            <div class="admin-cfg-stat-value">${st.storage}</div>
+          </div>
+        </div>
+      </div>`;
+    }).join('')}
     </div>`;
+}
+
+async function adminLoadConfig(id, name) {
+  const { data, error } = await supa.getConfigById(id);
+  if (error || !data) { showToast('Failed to load config', 'error'); return; }
+  deepMerge(state, data.state);
+  showToast(`"${name}" loaded into Planner ✓`, 'success');
+  navigateTo('dashboard');
 }
 
 async function adminToggle(id, status) {
