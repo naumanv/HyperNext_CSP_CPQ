@@ -30,11 +30,17 @@ A web-based Cloud Capacity Planning and Configure-Price-Quote (CPQ) application 
 - **Tier 3** — HDD Capacity with NVMe Cache (EC 4+2)
 - **Tier 4** — Archive Cold Storage (EC 9+3 + Compression)
 
-## Quick Start
+## 🌐 Live Application
+
+**[https://naumanv.github.io/HyperNext_CSP_CPQ/](https://naumanv.github.io/HyperNext_CSP_CPQ/)**
+
+> Powered by GitHub Pages — no server required.
+
+## Quick Start (Local)
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/HyperNext_CSP_CPQ.git
+git clone https://github.com/naumanv/HyperNext_CSP_CPQ.git
 cd HyperNext_CSP_CPQ
 
 # Run with Node.js (no dependencies)
